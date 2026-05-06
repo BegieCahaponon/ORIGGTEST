@@ -3,9 +3,9 @@ import telebot
 from flask import Flask, request
 from threading import Thread
 
-# Use Environment Variables for security (Set these in Render Dashboard)
-TOKEN = os.environ.get('8387040240:AAH7FFS6YbbY-a6IZAdUpyYNBsxJnhsPoMA')
-ADMIN_ID = os.environ.get('7817086667')
+# --- HARDCODED CREDENTIALS ---
+TOKEN = "8387040240:AAH7FFS6YbbY-a6IZAdUpyYNBsxJnhsPoMA"
+ADMIN_ID = "7817086667"
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
@@ -32,14 +32,19 @@ def check_status():
 
 @app.route('/')
 def home():
-    return "HEROSHI Monitor is Online"
+    return "KAPTVIP Monitor is Online"
 
 def run_bot():
-    bot.polling(none_stop=True)
+    # Adding a try-except to prevent the whole app from crashing if Telegram fails
+    try:
+        bot.polling(none_stop=True)
+    except Exception as e:
+        print(f"Bot Error: {e}")
 
 if __name__ == '__main__':
-    # Start Telegram bot in a background thread
+    # Start bot thread
     Thread(target=run_bot).start()
-    # Start Flask on the port Render provides
+    
+    # Render needs host='0.0.0.0' to be visible externally
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
