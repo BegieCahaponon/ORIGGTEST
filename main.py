@@ -4,8 +4,8 @@ from flask import Flask, request
 from threading import Thread
 
 # Use Environment Variables for security (Set these in Render Dashboard)
-TOKEN = os.environ.get('BOT_TOKEN')
-ADMIN_ID = os.environ.get('ADMIN_ID')
+TOKEN = os.environ.get('8387040240:AAH7FFS6YbbY-a6IZAdUpyYNBsxJnhsPoMA')
+ADMIN_ID = os.environ.get('7817086667')
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
