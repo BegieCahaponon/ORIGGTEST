@@ -1,82 +1,71 @@
 import os
-import json
 import telebot
-import logging
 from flask import Flask, request
 from threading import Thread
+from pymongo import MongoClient
 
 # --- CONFIGURATION ---
 TOKEN = "8387040240:AAH7FFS6YbbY-a6IZAdUpyYNBsxJnhsPoMA"
 ADMIN_ID = "7817086667" 
-DB_FILE = "users.json"
+# PASTE YOUR MONGODB LINK HERE 👇
+MONGO_URL = "mongodb+srv://begiecahaponon08:<db_password>@cluster0.a8hcjx1.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
+
+# --- DATABASE SETUP ---
+client = MongoClient(MONGO_URL)
+db = client['KAPTVIP_DB']
+users_col = db['users']
+settings_col = db['settings']
+
+# Initialize settings if empty
+if not settings_col.find_one({"id": "config"}):
+    settings_col.insert_one({"id": "config", "license_key": "KAPTVIP"})
 
 # --- STYLED MESSAGES ---
 PREFIX = "⚡ **KAPT-VIP HUB** ⚡\n"
 FOOTER = "\n\n💠 *Dev: KAPTVIP*"
 
-def load_db():
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, 'r') as f:
-                return json.load(f)
-        except: pass
-    return {
-        "users": {
-            ADMIN_ID: {"status": "active", "usage_count": 0, "locked_ip": None}
-        }, 
-        "settings": {"license_key": "KAPTVIP"}
-    }
-
-def save_db(data):
-    with open(DB_FILE, 'w') as f:
-        json.dump(data, f, indent=4)
-
-db = load_db()
-
 # --- ADMIN COMMANDS ---
 
-@bot.message_handler(commands=['resetall'])
-def reset_all(message):
-    """Wipes the database and restarts with only the Admin."""
+@bot.message_handler(commands=['stats'])
+def stats(message):
     if str(message.chat.id) != ADMIN_ID: return
-    global db
-    db = {
-        "users": {
-            ADMIN_ID: {"status": "active", "usage_count": 0, "locked_ip": None}
-        }, 
-        "settings": {"license_key": "KAPTVIP"}
-    }
-    save_db(db)
-    bot.reply_to(message, f"{PREFIX}♻️ **DATABASE WIPED CLEAN**\nAll users have been removed.\nRegister yourself again with /start." + FOOTER, parse_mode="Markdown")
+    total = users_col.count_documents({})
+    text = f"{PREFIX}📊 **SYSTEM DIAGNOSTICS**\nTotal Nodes: `{total}`\n\n"
+    
+    # Get last 10 users
+    recent_users = users_col.find().sort("_id", -1).limit(10)
+    for u in recent_users:
+        status_icon = "🟢" if u.get("status") == "active" else "🔴"
+        text += f"{status_icon} `{u['uid']}` | ⚡ `{u.get('usage', 0)}` uses\n"
+    
+    bot.reply_to(message, text + FOOTER, parse_mode="Markdown")
 
-@bot.message_handler(commands=['unblock', 'unrevoke'])
+@bot.message_handler(commands=['unblock', 'unlock'])
 def unblock_user(message):
     if str(message.chat.id) != ADMIN_ID: return
     try:
         target_id = message.text.split()[1].strip()
-        if target_id in db["users"]:
-            db["users"][target_id]["status"] = "active"
-            db["users"][target_id]["locked_ip"] = None # Reset IP lock
-            save_db(db)
-            bot.reply_to(message, f"{PREFIX}🔓 **USER RESTORED**\nID: `{target_id}`\nStatus: Active & IP Reset" + FOOTER, parse_mode="Markdown")
-        else:
-            bot.reply_to(message, f"{PREFIX}❌ ID `{target_id}` not found.")
+        users_col.update_one({"uid": target_id}, {"$set": {"status": "active", "locked_ip": None}})
+        bot.reply_to(message, f"{PREFIX}🔓 **USER RESTORED**\nID: `{target_id}`" + FOOTER, parse_mode="Markdown")
     except:
         bot.reply_to(message, "⚠️ Usage: `/unblock [ID]`")
+
+@bot.message_handler(commands=['resetall'])
+def reset_all(message):
+    if str(message.chat.id) != ADMIN_ID: return
+    users_col.delete_many({"uid": {"$ne": ADMIN_ID}}) # Delete all except Admin
+    bot.reply_to(message, f"{PREFIX}♻️ **DATABASE WIPED**" + FOOTER, parse_mode="Markdown")
 
 @bot.message_handler(commands=['kill'])
 def kill_user(message):
     if str(message.chat.id) != ADMIN_ID: return
     try:
         target_id = message.text.split()[1].strip()
-        if target_id == ADMIN_ID: return
-        if target_id in db["users"]:
-            db["users"][target_id]["status"] = "killed"
-            save_db(db)
-            bot.reply_to(message, f"{PREFIX}🚫 **ACCESS REVOKED**\nID: `{target_id}`" + FOOTER, parse_mode="Markdown")
+        users_col.update_one({"uid": target_id}, {"$set": {"status": "killed"}})
+        bot.reply_to(message, f"{PREFIX}🚫 **BANNED**\nID: `{target_id}`" + FOOTER, parse_mode="Markdown")
     except: pass
 
 @bot.message_handler(commands=['setkey'])
@@ -84,20 +73,16 @@ def set_key(message):
     if str(message.chat.id) != ADMIN_ID: return
     try:
         new_key = message.text.split(maxsplit=1)[1].strip()
-        db["settings"]["license_key"] = new_key
-        save_db(db)
+        settings_col.update_one({"id": "config"}, {"$set": {"license_key": new_key}})
         bot.reply_to(message, f"{PREFIX}🔑 **KEY UPDATED:** `{new_key}`" + FOOTER, parse_mode="Markdown")
     except: pass
 
 @bot.message_handler(commands=['start', 'register'])
 def register(message):
     uid = str(message.chat.id)
-    if uid not in db["users"]:
-        db["users"][uid] = {"status": "active", "usage_count": 0, "locked_ip": None}
-        save_db(db)
-        bot.reply_to(message, f"{PREFIX}✅ **REGISTERED**\nYour ID: `{uid}`" + FOOTER, parse_mode="Markdown")
-    else:
-        bot.reply_to(message, f"{PREFIX}ℹ️ **ALREADY ACTIVE**\nID: `{uid}`" + FOOTER, parse_mode="Markdown")
+    if not users_col.find_one({"uid": uid}):
+        users_col.insert_one({"uid": uid, "status": "active", "usage": 0, "locked_ip": None})
+    bot.reply_to(message, f"{PREFIX}✅ **ACCESS GRANTED**\nID: `{uid}`" + FOOTER, parse_mode="Markdown")
 
 # --- LUA API ---
 
@@ -106,39 +91,32 @@ def check_status():
     target_id = str(request.args.get('id', '')).strip()
     client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
 
-    # 1. Verification: Only access if ID exists in our database
-    if not target_id or target_id not in db["users"]:
+    user = users_col.find_one({"uid": target_id})
+    if not user:
         return "not_registered"
     
-    user_data = db["users"][target_id]
-
-    # 2. Check if the ID is manually blocked (Revoked)
-    if user_data.get("status") == "killed":
+    if user.get("status") == "killed":
         return "killed|0"
 
-    # 3. ANTI-SPOOFING & IP LOCK
-    # If it's your Admin ID, be extra strict
+    # Admin Spoof Protection
     if target_id == ADMIN_ID:
-        if user_data["locked_ip"] is not None and user_data["locked_ip"] != client_ip:
-            # Notify you if someone tries to use your ID
-            bot.send_message(ADMIN_ID, f"🚨 **WARNING!**\nSomeone tried to use your Admin ID from IP: `{client_ip}`")
-            return "killed|SPOOF_DETECTED"
+        if user["locked_ip"] and user["locked_ip"] != client_ip:
+            bot.send_message(ADMIN_ID, f"🚨 **SPOOF ATTEMPT** from IP: `{client_ip}`")
+            return "killed|SPOOF"
     
-    # 4. Standard IP Lock (One ID = One Device)
-    if user_data["locked_ip"] is None:
-        user_data["locked_ip"] = client_ip
-        save_db(db)
-    elif user_data["locked_ip"] != client_ip:
+    # Device Lock
+    if not user["locked_ip"]:
+        users_col.update_one({"uid": target_id}, {"$set": {"locked_ip": client_ip}})
+    elif user["locked_ip"] != client_ip:
         return "killed|IP_MISMATCH"
 
-    current_key = db["settings"].get("license_key", "KAPTVIP")
-    user_data["usage_count"] = user_data.get("usage_count", 0) + 1
-    save_db(db)
+    config = settings_col.find_one({"id": "config"})
+    users_col.update_one({"uid": target_id}, {"$inc": {"usage": 1}})
     
-    return f"active|{current_key}"
+    return f"active|{config['license_key']}"
 
 @app.route('/')
-def home(): return "KAPTVIP SERVER ONLINE"
+def home(): return "KAPTVIP MONGODB SERVER ONLINE"
 
 if __name__ == '__main__':
     Thread(target=lambda: bot.infinity_polling(), daemon=True).start()
