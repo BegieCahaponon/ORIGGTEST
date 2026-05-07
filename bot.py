@@ -7,262 +7,159 @@ import asyncio
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
-from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler, ContextTypes
-)
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# ============================================================
-#  CONFIG — set these as environment variables on Render
 # ============================================================
 BOT_TOKEN    = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN")
 ADMIN_ID     = int(os.environ.get("ADMIN_ID", "0"))
 PORT         = int(os.environ.get("PORT", 5000))
 DB_PATH      = "bot_data.db"
 KEY_DURATION = timedelta(days=1)
+TIME_FORMAT  = "%Y-%m-%d %H:%M:%S"
 # ============================================================
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
 flask_app = Flask(__name__)
-TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-
-# ─────────────────────────────────────────────────────────────
-#  DATABASE
-# ─────────────────────────────────────────────────────────────
-
+# ─── DB ───────────────────────────────────────────────────────
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id             INTEGER PRIMARY KEY AUTOINCREMENT,
-            telegram_id    INTEGER UNIQUE NOT NULL,
-            telegram_name  TEXT,
-            key            TEXT UNIQUE,
-            active         INTEGER DEFAULT 1,
-            usage_count    INTEGER DEFAULT 0,
-            expires_at     TIMESTAMP,
-            registered_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
+    c = sqlite3.connect(DB_PATH)
+    c.execute("""CREATE TABLE IF NOT EXISTS users (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        telegram_id   INTEGER UNIQUE NOT NULL,
+        telegram_name TEXT,
+        key           TEXT UNIQUE,
+        active        INTEGER DEFAULT 1,
+        usage_count   INTEGER DEFAULT 0,
+        expires_at    TIMESTAMP,
+        registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""")
+    c.commit()
+    c.close()
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    c = sqlite3.connect(DB_PATH)
+    c.row_factory = sqlite3.Row
+    return c
 
-def generate_key():
+def gen_key():
     return secrets.token_hex(8).upper()
 
-def now():
+def utcnow():
     return datetime.utcnow()
 
-def expiry_from_now():
-    return now() + KEY_DURATION
-
-def format_dt(dt_str):
+def fmt(dt_str):
     if not dt_str:
         return "N/A"
     try:
-        return datetime.strptime(dt_str, TIME_FORMAT).strftime("%b %d, %Y %H:%M UTC")
-    except Exception:
+        return datetime.strptime(dt_str, TIME_FORMAT).strftime("%b %d %Y %H:%M UTC")
+    except:
         return str(dt_str)
 
-def is_expired(expires_at_str):
-    if not expires_at_str:
+def expired(exp_str):
+    if not exp_str:
         return False
     try:
-        return now() > datetime.strptime(expires_at_str, TIME_FORMAT)
-    except Exception:
+        return utcnow() > datetime.strptime(exp_str, TIME_FORMAT)
+    except:
         return False
 
-def time_left(expires_at_str):
-    if not expires_at_str:
+def tleft(exp_str):
+    if not exp_str:
         return "never"
     try:
-        diff = datetime.strptime(expires_at_str, TIME_FORMAT) - now()
-        if diff.total_seconds() <= 0:
+        d = datetime.strptime(exp_str, TIME_FORMAT) - utcnow()
+        if d.total_seconds() <= 0:
             return "expired"
-        hours, rem = divmod(int(diff.total_seconds()), 3600)
-        mins = rem // 60
-        return f"{hours // 24}d {hours % 24}h" if hours >= 24 else f"{hours}h {mins}m"
-    except Exception:
+        h, r = divmod(int(d.total_seconds()), 3600)
+        m = r // 60
+        return f"{h//24}d {h%24}h" if h >= 24 else f"{h}h {m}m"
+    except:
         return "unknown"
 
-def is_admin(uid: int) -> bool:
+def is_admin(uid):
     return uid == ADMIN_ID
 
-
-# ─────────────────────────────────────────────────────────────
-#  KEYBOARDS
-# ─────────────────────────────────────────────────────────────
-
-def user_keyboard():
+# ─── KEYBOARDS ────────────────────────────────────────────────
+def kb_user():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔑 My Key", callback_data="mykey"),
-         InlineKeyboardButton("📊 My Stats", callback_data="mystats")],
-        [InlineKeyboardButton("❓ Help", callback_data="help")]
+        [InlineKeyboardButton("🔑 My Key",    callback_data="mykey"),
+         InlineKeyboardButton("📊 My Stats",  callback_data="mystats")],
+        [InlineKeyboardButton("❓ Help",       callback_data="help")]
     ])
 
-def admin_keyboard():
+def kb_admin():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("👥 Users", callback_data="users"),
-         InlineKeyboardButton("📊 Stats", callback_data="stats")],
-        [InlineKeyboardButton("🔑 My Key", callback_data="mykey"),
-         InlineKeyboardButton("❓ Help", callback_data="help")]
+        [InlineKeyboardButton("👥 Users",     callback_data="users"),
+         InlineKeyboardButton("📊 Stats",     callback_data="stats")],
+        [InlineKeyboardButton("🔑 My Key",    callback_data="mykey"),
+         InlineKeyboardButton("❓ Help",       callback_data="help")]
     ])
 
+def kb(uid):
+    return kb_admin() if is_admin(uid) else kb_user()
 
-# ─────────────────────────────────────────────────────────────
-#  FLASK — Lua connects here + Render health check
-# ─────────────────────────────────────────────────────────────
+# ─── FLASK ────────────────────────────────────────────────────
+@flask_app.route("/")
+def root():
+    return jsonify({"status": "ok"})
 
 @flask_app.route("/health")
 def health():
     return jsonify({"status": "ok"})
-
-@flask_app.route("/")
-def index():
-    return jsonify({"status": "bot running"})
 
 @flask_app.route("/validate", methods=["POST"])
 def validate():
     data = request.get_json(silent=True)
     if not data or "key" not in data:
         return jsonify({"valid": False, "reason": "missing key"}), 400
-
     key  = data["key"].strip().upper()
     conn = get_db()
-    user = conn.execute(
-        "SELECT * FROM users WHERE UPPER(key)=? AND active=1", (key,)
-    ).fetchone()
-
+    user = conn.execute("SELECT * FROM users WHERE UPPER(key)=? AND active=1", (key,)).fetchone()
     if not user:
         conn.close()
         return jsonify({"valid": False, "reason": "invalid or revoked key"})
-
-    if is_expired(user["expires_at"]):
+    if expired(user["expires_at"]):
         conn.execute("UPDATE users SET active=0 WHERE telegram_id=?", (user["telegram_id"],))
         conn.commit()
         conn.close()
         return jsonify({"valid": False, "reason": "key expired"})
-
-    new_count = user["usage_count"] + 1
-    conn.execute("UPDATE users SET usage_count=? WHERE telegram_id=?", (new_count, user["telegram_id"]))
+    n = user["usage_count"] + 1
+    conn.execute("UPDATE users SET usage_count=? WHERE telegram_id=?", (n, user["telegram_id"]))
     conn.commit()
     conn.close()
+    return jsonify({"valid": True, "telegram_name": user["telegram_name"],
+                    "usage_count": n, "time_left": tleft(user["expires_at"])})
 
-    return jsonify({
-        "valid": True,
-        "telegram_name": user["telegram_name"],
-        "usage_count": new_count,
-        "expires_at": format_dt(user["expires_at"]),
-        "time_left": time_left(user["expires_at"])
-    })
-
-
-# ─────────────────────────────────────────────────────────────
-#  TELEGRAM BOT (runs in its own thread + event loop)
-# ─────────────────────────────────────────────────────────────
-
-async def expiry_checker(context: ContextTypes.DEFAULT_TYPE):
-    conn = get_db()
-    expired_users = conn.execute(
-        "SELECT * FROM users WHERE active=1 AND expires_at IS NOT NULL AND expires_at <= ?",
-        (now().strftime(TIME_FORMAT),)
-    ).fetchall()
-    for user in expired_users:
-        conn.execute("UPDATE users SET active=0 WHERE telegram_id=?", (user["telegram_id"],))
-        conn.commit()
-        try:
-            await context.bot.send_message(
-                chat_id=user["telegram_id"],
-                text="⏰ *Your key has expired!*\n\nContact the admin to renew.",
-                parse_mode="Markdown"
-            )
-        except Exception:
-            pass
-        if ADMIN_ID:
-            try:
-                await context.bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text=f"⏰ Expired: @{user['telegram_name']} (`{user['telegram_id']}`)\n"
-                         f"Use `/setkey {user['telegram_id']}` to renew.",
-                    parse_mode="Markdown"
-                )
-            except Exception:
-                pass
-    conn.close()
-
-async def post_init(application: Application):
-    await application.bot.set_my_commands([
-        BotCommand("start",  "Register & get your key"),
-        BotCommand("mykey",  "Show your key & expiry"),
-        BotCommand("help",   "Show all commands"),
-        BotCommand("users",  "List all users (admin)"),
-        BotCommand("setkey", "Set/renew a user key (admin)"),
-        BotCommand("kill",   "Revoke user access (admin)"),
-        BotCommand("revive", "Restore user access (admin)"),
-        BotCommand("stats",  "View statistics (admin)"),
-        BotCommand("notify", "Broadcast message (admin)"),
-    ])
-
+# ─── BOT HANDLERS ─────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    tg_user  = update.effective_user
-    tid      = tg_user.id
-    name     = tg_user.username or tg_user.first_name or "unknown"
-    conn     = get_db()
-    existing = conn.execute("SELECT * FROM users WHERE telegram_id=?", (tid,)).fetchone()
-
-    if existing:
+    u    = update.effective_user
+    tid  = u.id
+    name = u.username or u.first_name or "unknown"
+    conn = get_db()
+    ex   = conn.execute("SELECT * FROM users WHERE telegram_id=?", (tid,)).fetchone()
+    if ex:
         conn.close()
-        if is_expired(existing["expires_at"]):
-            return await update.message.reply_text(
-                "⏰ Your key has *expired!*\nContact the admin to renew.",
-                parse_mode="Markdown", reply_markup=user_keyboard()
-            )
-        if not existing["active"]:
-            return await update.message.reply_text(
-                "❌ Your access has been revoked. Contact the admin.",
-                reply_markup=user_keyboard()
-            )
-        kb = admin_keyboard() if is_admin(tid) else user_keyboard()
+        if expired(ex["expires_at"]):
+            return await update.message.reply_text("⏰ *Key expired!* Contact admin.", parse_mode="Markdown", reply_markup=kb(tid))
+        if not ex["active"]:
+            return await update.message.reply_text("❌ Access revoked. Contact admin.", reply_markup=kb(tid))
         return await update.message.reply_text(
-            f"👋 Welcome back, @{name}!\n\n"
-            f"🔑 Key: `{existing['key']}`\n"
-            f"⌛ Time left: `{time_left(existing['expires_at'])}`\n"
-            f"📊 Total uses: `{existing['usage_count']}`",
-            parse_mode="Markdown", reply_markup=kb
-        )
-
-    new_key    = generate_key()
-    expires_at = expiry_from_now().strftime(TIME_FORMAT)
-    conn.execute(
-        "INSERT INTO users (telegram_id, telegram_name, key, active, expires_at) VALUES (?, ?, ?, 1, ?)",
-        (tid, name, new_key, expires_at)
-    )
+            f"👋 Welcome back @{name}!\n\n🔑 Key: `{ex['key']}`\n⌛ Left: `{tleft(ex['expires_at'])}`\n📊 Uses: `{ex['usage_count']}`",
+            parse_mode="Markdown", reply_markup=kb(tid))
+    new_key = gen_key()
+    exp_at  = (utcnow() + KEY_DURATION).strftime(TIME_FORMAT)
+    conn.execute("INSERT INTO users (telegram_id,telegram_name,key,active,expires_at) VALUES(?,?,?,1,?)",
+                 (tid, name, new_key, exp_at))
     conn.commit()
     conn.close()
-
     await update.message.reply_text(
-        f"✅ *Welcome, @{name}!*\n\n"
-        f"🎉 You are now registered!\n\n"
-        f"🔑 Your Key:\n`{new_key}`\n\n"
-        f"⏳ Valid for: *1 day*\n"
-        f"📅 Expires: `{format_dt(expires_at)}`\n\n"
-        f"📋 Copy the key and paste it into the script.",
-        parse_mode="Markdown", reply_markup=user_keyboard()
-    )
+        f"✅ *Welcome @{name}!*\n\n🎉 Registered!\n\n🔑 Your Key:\n`{new_key}`\n\n⏳ Valid: *1 day*\n📅 Expires: `{fmt(exp_at)}`\n\n📋 Paste the key into the script.",
+        parse_mode="Markdown", reply_markup=kb(tid))
     if ADMIN_ID:
-        await ctx.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=f"🆕 *New user registered!*\n"
-                 f"👤 @{name} · `{tid}`\n"
-                 f"🔑 Key: `{new_key}`\n"
-                 f"⏳ Expires: `{format_dt(expires_at)}`",
-            parse_mode="Markdown"
-        )
+        await ctx.bot.send_message(ADMIN_ID,
+            f"🆕 *New user!*\n👤 @{name} · `{tid}`\n🔑 `{new_key}`\n⏳ `{fmt(exp_at)}`",
+            parse_mode="Markdown")
 
 async def cmd_mykey(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     tid  = update.effective_user.id
@@ -271,20 +168,13 @@ async def cmd_mykey(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     conn.close()
     if not user:
         return await update.message.reply_text("❌ Not registered. Send /start first.")
-    if is_expired(user["expires_at"]):
-        return await update.message.reply_text(
-            "⏰ Your key has *expired!*\nContact the admin to renew.",
-            parse_mode="Markdown", reply_markup=user_keyboard()
-        )
+    if expired(user["expires_at"]):
+        return await update.message.reply_text("⏰ *Key expired!* Contact admin.", parse_mode="Markdown", reply_markup=kb(tid))
     if not user["active"]:
-        return await update.message.reply_text("❌ Your access has been revoked.")
+        return await update.message.reply_text("❌ Access revoked.")
     await update.message.reply_text(
-        f"🔑 *Your Key:*\n`{user['key']}`\n\n"
-        f"⏳ *Expires:* `{format_dt(user['expires_at'])}`\n"
-        f"⌛ *Time Left:* `{time_left(user['expires_at'])}`\n"
-        f"📊 *Total Uses:* `{user['usage_count']}`",
-        parse_mode="Markdown", reply_markup=user_keyboard()
-    )
+        f"🔑 *Key:*\n`{user['key']}`\n\n⏳ Expires: `{fmt(user['expires_at'])}`\n⌛ Left: `{tleft(user['expires_at'])}`\n📊 Uses: `{user['usage_count']}`",
+        parse_mode="Markdown", reply_markup=kb(tid))
 
 async def cmd_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -293,210 +183,266 @@ async def cmd_users(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     users = conn.execute("SELECT * FROM users ORDER BY registered_at DESC").fetchall()
     conn.close()
     if not users:
-        return await update.message.reply_text("📭 No users yet.", reply_markup=admin_keyboard())
+        return await update.message.reply_text("📭 No users yet.", reply_markup=kb_admin())
     total  = len(users)
-    active = sum(1 for u in users if u["active"] and not is_expired(u["expires_at"]))
-    lines  = [f"👥 *Users — {total} total | {active} active*\n"]
+    active = sum(1 for u in users if u["active"] and not expired(u["expires_at"]))
+    lines  = [f"👥 *{total} users | {active} active*\n"]
     for u in users:
-        expired = is_expired(u["expires_at"])
-        icon    = "❌" if not u["active"] else ("⏰" if expired else "✅")
-        key_str = f"`{u['key']}`" if u["key"] else "_no key_"
-        lines.append(
-            f"{icon} @{u['telegram_name']} · `{u['telegram_id']}`\n"
-            f"    🔑 {key_str} · ⌛ {time_left(u['expires_at'])} · 📊 {u['usage_count']} uses"
-        )
+        icon = "❌" if not u["active"] else ("⏰" if expired(u["expires_at"]) else "✅")
+        lines.append(f"{icon} @{u['telegram_name']} · `{u['telegram_id']}`\n    🔑 `{u['key'] or 'none'}` · ⌛ {tleft(u['expires_at'])} · 📊 {u['usage_count']}")
     text = "\n".join(lines)
     if len(text) > 4096:
         text = text[:4090] + "\n…"
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=admin_keyboard())
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb_admin())
 
 async def cmd_setkey(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return await update.message.reply_text("❌ Admin only.")
     if not ctx.args:
         return await update.message.reply_text(
-            "Usage:\n"
-            "`/setkey <id>` — auto key (1 day)\n"
-            "`/setkey <id> <key>` — custom key (1 day)\n"
-            "`/setkey <id> <key> <days>` — custom key + days",
-            parse_mode="Markdown", reply_markup=admin_keyboard()
-        )
+            "Usage:\n`/setkey <id>` — auto key 1 day\n`/setkey <id> <key>` — custom key\n`/setkey <id> <key> <days>` — custom days",
+            parse_mode="Markdown", reply_markup=kb_admin())
     try:
-        target_id = int(ctx.args[0])
-    except ValueError:
-        return await update.message.reply_text("❌ Telegram ID must be a number.")
-    new_key = ctx.args[1].strip().upper() if len(ctx.args) >= 2 else generate_key()
+        tid = int(ctx.args[0])
+    except:
+        return await update.message.reply_text("❌ ID must be a number.")
+    new_key = ctx.args[1].strip().upper() if len(ctx.args) >= 2 else gen_key()
     days    = int(ctx.args[2]) if len(ctx.args) >= 3 else 1
-    exp     = (now() + timedelta(days=days)).strftime(TIME_FORMAT)
+    exp_at  = (utcnow() + timedelta(days=days)).strftime(TIME_FORMAT)
     conn    = get_db()
-    user    = conn.execute("SELECT * FROM users WHERE telegram_id=?", (target_id,)).fetchone()
+    user    = conn.execute("SELECT * FROM users WHERE telegram_id=?", (tid,)).fetchone()
     if not user:
         conn.close()
-        return await update.message.reply_text(f"❌ User `{target_id}` not found.", parse_mode="Markdown")
-    taken = conn.execute(
-        "SELECT telegram_id FROM users WHERE UPPER(key)=? AND telegram_id!=?", (new_key, target_id)
-    ).fetchone()
+        return await update.message.reply_text("❌ User not found.")
+    taken = conn.execute("SELECT telegram_id FROM users WHERE UPPER(key)=? AND telegram_id!=?", (new_key, tid)).fetchone()
     if taken:
         conn.close()
-        return await update.message.reply_text("❌ That key is already in use.")
-    conn.execute("UPDATE users SET key=?, active=1, expires_at=? WHERE telegram_id=?", (new_key, exp, target_id))
+        return await update.message.reply_text("❌ Key already in use.")
+    conn.execute("UPDATE users SET key=?,active=1,expires_at=? WHERE telegram_id=?", (new_key, exp_at, tid))
     conn.commit()
     conn.close()
     try:
-        await ctx.bot.send_message(
-            chat_id=target_id,
-            text=f"🎉 *Your key has been set!*\n\n"
-                 f"🔑 Key:\n`{new_key}`\n\n"
-                 f"⏳ Valid for: *{days} day(s)*\n"
-                 f"📅 Expires: `{format_dt(exp)}`\n\n"
-                 f"📋 Copy the key and paste it into the script.",
-            parse_mode="Markdown", reply_markup=user_keyboard()
-        )
-        notify_status = "✅ User notified."
-    except Exception:
-        notify_status = "⚠️ Could not notify user."
+        await ctx.bot.send_message(tid,
+            f"🎉 *Key set!*\n\n🔑 `{new_key}`\n⏳ Valid: *{days} day(s)*\n📅 Expires: `{fmt(exp_at)}`\n\n📋 Paste key into script.",
+            parse_mode="Markdown", reply_markup=kb_user())
+        note = "✅ User notified."
+    except:
+        note = "⚠️ Could not notify user."
     await update.message.reply_text(
-        f"✅ Key set for @{user['telegram_name']}\n"
-        f"🔑 `{new_key}`\n"
-        f"⏳ Expires in {days} day(s): `{format_dt(exp)}`\n\n{notify_status}",
-        parse_mode="Markdown", reply_markup=admin_keyboard()
-    )
+        f"✅ Key set for @{user['telegram_name']}\n🔑 `{new_key}`\n⏳ {days} day(s): `{fmt(exp_at)}`\n\n{note}",
+        parse_mode="Markdown", reply_markup=kb_admin())
 
 async def cmd_kill(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return await update.message.reply_text("❌ Admin only.")
     if not ctx.args:
-        return await update.message.reply_text("Usage: `/kill <telegram_id>`", parse_mode="Markdown")
+        return await update.message.reply_text("Usage: `/kill <id>`", parse_mode="Markdown")
     try:
-        target_id = int(ctx.args[0])
-    except ValueError:
+        tid = int(ctx.args[0])
+    except:
         return await update.message.reply_text("❌ Invalid ID.")
     conn = get_db()
-    user = conn.execute("SELECT * FROM users WHERE telegram_id=?", (target_id,)).fetchone()
+    user = conn.execute("SELECT * FROM users WHERE telegram_id=?", (tid,)).fetchone()
     if not user:
         conn.close()
         return await update.message.reply_text("❌ User not found.")
-    conn.execute("UPDATE users SET active=0 WHERE telegram_id=?", (target_id,))
+    conn.execute("UPDATE users SET active=0 WHERE telegram_id=?", (tid,))
     conn.commit()
     conn.close()
     try:
-        await ctx.bot.send_message(chat_id=target_id, text="🚫 Your access has been revoked by the admin.")
-    except Exception:
+        await ctx.bot.send_message(tid, "🚫 Your access has been revoked by the admin.")
+    except:
         pass
-    await update.message.reply_text(f"🔴 @{user['telegram_name']} has been killed.", reply_markup=admin_keyboard())
+    await update.message.reply_text(f"🔴 @{user['telegram_name']} killed.", reply_markup=kb_admin())
 
 async def cmd_revive(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return await update.message.reply_text("❌ Admin only.")
     if not ctx.args:
-        return await update.message.reply_text("Usage: `/revive <telegram_id>`", parse_mode="Markdown")
+        return await update.message.reply_text("Usage: `/revive <id>`", parse_mode="Markdown")
     try:
-        target_id = int(ctx.args[0])
-    except ValueError:
+        tid = int(ctx.args[0])
+    except:
         return await update.message.reply_text("❌ Invalid ID.")
     conn    = get_db()
-    user    = conn.execute("SELECT * FROM users WHERE telegram_id=?", (target_id,)).fetchone()
+    user    = conn.execute("SELECT * FROM users WHERE telegram_id=?", (tid,)).fetchone()
     if not user:
         conn.close()
         return await update.message.reply_text("❌ User not found.")
-    new_exp = expiry_from_now().strftime(TIME_FORMAT)
-    conn.execute("UPDATE users SET active=1, expires_at=? WHERE telegram_id=?", (new_exp, target_id))
+    new_exp = (utcnow() + KEY_DURATION).strftime(TIME_FORMAT)
+    conn.execute("UPDATE users SET active=1,expires_at=? WHERE telegram_id=?", (new_exp, tid))
     conn.commit()
     conn.close()
     try:
-        await ctx.bot.send_message(
-            chat_id=target_id,
-            text=f"✅ Your access has been restored!\n⏳ New expiry: `{format_dt(new_exp)}`",
-            parse_mode="Markdown", reply_markup=user_keyboard()
-        )
-    except Exception:
+        await ctx.bot.send_message(tid, f"✅ Access restored!\n⏳ Expires: `{fmt(new_exp)}`", parse_mode="Markdown", reply_markup=kb_user())
+    except:
         pass
-    await update.message.reply_text(
-        f"✅ @{user['telegram_name']} revived.\n⏳ Expires: `{format_dt(new_exp)}`",
-        parse_mode="Markdown", reply_markup=admin_keyboard()
-    )
+    await update.message.reply_text(f"✅ @{user['telegram_name']} revived.\n⏳ `{fmt(new_exp)}`", parse_mode="Markdown", reply_markup=kb_admin())
 
 async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return await update.message.reply_text("❌ Admin only.")
-    conn      = get_db()
-    total     = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-    active    = conn.execute("SELECT COUNT(*) FROM users WHERE active=1").fetchone()[0]
-    with_key  = conn.execute("SELECT COUNT(*) FROM users WHERE key IS NOT NULL").fetchone()[0]
-    total_use = conn.execute("SELECT SUM(usage_count) FROM users").fetchone()[0] or 0
-    top       = conn.execute("SELECT telegram_name, usage_count FROM users ORDER BY usage_count DESC LIMIT 5").fetchall()
-    all_a     = conn.execute("SELECT expires_at FROM users WHERE active=1").fetchall()
-    expired_c = sum(1 for u in all_a if is_expired(u["expires_at"]))
+    conn  = get_db()
+    total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    act   = conn.execute("SELECT COUNT(*) FROM users WHERE active=1").fetchone()[0]
+    uses  = conn.execute("SELECT SUM(usage_count) FROM users").fetchone()[0] or 0
+    top   = conn.execute("SELECT telegram_name,usage_count FROM users ORDER BY usage_count DESC LIMIT 5").fetchall()
     conn.close()
-    top_str = "\n".join(f"   @{u['telegram_name']}: {u['usage_count']} uses" for u in top) or "   None yet"
+    top_str = "\n".join(f"   @{u['telegram_name']}: {u['usage_count']}" for u in top) or "   None"
     await update.message.reply_text(
-        f"📊 *Statistics*\n\n"
-        f"👥 Total users: `{total}`\n"
-        f"✅ Active: `{active}`\n"
-        f"⏰ Expired: `{expired_c}`\n"
-        f"🔑 With key: `{with_key}`\n"
-        f"📈 Total uses: `{total_use}`\n\n"
-        f"🏆 *Top 5:*\n{top_str}",
-        parse_mode="Markdown", reply_markup=admin_keyboard()
-    )
+        f"📊 *Stats*\n\n👥 Total: `{total}`\n✅ Active: `{act}`\n📈 Uses: `{uses}`\n\n🏆 *Top 5:*\n{top_str}",
+        parse_mode="Markdown", reply_markup=kb_admin())
 
 async def cmd_notify(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return await update.message.reply_text("❌ Admin only.")
     if not ctx.args:
         return await update.message.reply_text(
-            "Usage:\n"
-            "`/notify <message>` — Broadcast to all users\n"
-            "`/notify active <message>` — Active users only",
-            parse_mode="Markdown", reply_markup=admin_keyboard()
-        )
+            "Usage:\n`/notify <msg>` — all users\n`/notify active <msg>` — active only",
+            parse_mode="Markdown", reply_markup=kb_admin())
     active_only = ctx.args[0].lower() == "active"
-    message     = " ".join(ctx.args[1:]) if active_only else " ".join(ctx.args)
-    if not message.strip():
-        return await update.message.reply_text("❌ Message cannot be empty.")
+    msg         = " ".join(ctx.args[1:]) if active_only else " ".join(ctx.args)
+    if not msg.strip():
+        return await update.message.reply_text("❌ Message is empty.")
     conn  = get_db()
     users = conn.execute("SELECT * FROM users WHERE active=1").fetchall() if active_only else conn.execute("SELECT * FROM users").fetchall()
     if active_only:
-        users = [u for u in users if not is_expired(u["expires_at"])]
+        users = [u for u in users if not expired(u["expires_at"])]
     label = "active users" if active_only else "all users"
     conn.close()
     if not users:
-        return await update.message.reply_text("📭 No users to notify.")
-    status_msg = await update.message.reply_text(f"📤 Sending to {len(users)} {label}...")
-    sent, failed = 0, 0
-    for user in users:
+        return await update.message.reply_text("📭 No users.")
+    s = await update.message.reply_text(f"📤 Sending to {len(users)} {label}...")
+    sent, fail = 0, 0
+    for u in users:
         try:
-            await ctx.bot.send_message(
-                chat_id=user["telegram_id"],
-                text=f"📢 *Message from Admin:*\n\n{message}",
-                parse_mode="Markdown"
-            )
+            await ctx.bot.send_message(u["telegram_id"], f"📢 *Message from Admin:*\n\n{msg}", parse_mode="Markdown")
             sent += 1
-        except Exception:
-            failed += 1
+        except:
+            fail += 1
         await asyncio.sleep(0.05)
-    await status_msg.edit_text(
-        f"✅ *Broadcast done!*\n\n📤 Sent: `{sent}`\n❌ Failed: `{failed}`\n👥 Target: {label}",
-        parse_mode="Markdown", reply_markup=admin_keyboard()
-    )
+    await s.edit_text(f"✅ *Done!*\n📤 Sent: `{sent}`\n❌ Failed: `{fail}`\n👥 {label}", parse_mode="Markdown", reply_markup=kb_admin())
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    admin_cmds = (
-        "\n\n👑 *Admin Commands:*\n"
-        "/users — List all users\n"
-        "/setkey `<id>` `[key]` `[days]` — Set/renew key\n"
+    admin_txt = (
+        "\n\n👑 *Admin:*\n"
+        "/users — All users\n"
+        "/setkey `<id> [key] [days]` — Set key\n"
         "/kill `<id>` — Revoke access\n"
-        "/revive `<id>` — Restore + renew 1 day\n"
+        "/revive `<id>` — Restore access\n"
         "/stats — Statistics\n"
-        "/notify `<msg>` — Broadcast to all\n"
-        "/notify `active <msg>` — Active users only"
+        "/notify `<msg>` — Broadcast all\n"
+        "/notify `active <msg>` — Active only"
     ) if is_admin(uid) else ""
-    kb = admin_keyboard() if is_admin(uid) else user_keyboard()
     await update.message.reply_text(
-        "🤖 *Commands:*\n"
-        "/start — Register & get your key\n"
-        "/mykey — Show key, expiry & usage\n"
-        "/help — Show this menu"
-        + admin_cmds,
-        parse_mode="Markdown", reply_mark
+        "🤖 *Commands:*\n/start — Register & get key\n/mykey — Show key & expiry\n/help — This menu" + admin_txt,
+        parse_mode="Markdown", reply_markup=kb(uid))
+
+async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    d   = q.data
+
+    if d == "mykey":
+        conn = get_db()
+        user = conn.execute("SELECT * FROM users WHERE telegram_id=?", (uid,)).fetchone()
+        conn.close()
+        if not user or not user["key"]:
+            return await q.edit_message_text("❌ No key. Send /start first.")
+        if expired(user["expires_at"]):
+            return await q.edit_message_text("⏰ *Key expired!* Contact admin.", parse_mode="Markdown", reply_markup=kb_user())
+        await q.edit_message_text(
+            f"🔑 *Key:*\n`{user['key']}`\n\n⏳ `{fmt(user['expires_at'])}`\n⌛ `{tleft(user['expires_at'])}`\n📊 Uses: `{user['usage_count']}`",
+            parse_mode="Markdown", reply_markup=kb_user())
+
+    elif d == "mystats":
+        conn = get_db()
+        user = conn.execute("SELECT * FROM users WHERE telegram_id=?", (uid,)).fetchone()
+        conn.close()
+        if not user:
+            return await q.edit_message_text("❌ Not registered.")
+        await q.edit_message_text(
+            f"📊 *Stats*\n\n👤 @{user['telegram_name']}\n🔑 `{user['key'] or 'none'}`\n⌛ `{tleft(user['expires_at'])}`\n📈 Uses: `{user['usage_count']}`",
+            parse_mode="Markdown", reply_markup=kb_user())
+
+    elif d == "users" and is_admin(uid):
+        conn  = get_db()
+        users = conn.execute("SELECT * FROM users ORDER BY registered_at DESC").fetchall()
+        conn.close()
+        total  = len(users)
+        active = sum(1 for u in users if u["active"] and not expired(u["expires_at"]))
+        lines  = [f"👥 *{total} users | {active} active*\n"]
+        for u in users:
+            icon = "❌" if not u["active"] else ("⏰" if expired(u["expires_at"]) else "✅")
+            lines.append(f"{icon} @{u['telegram_name']} · `{u['telegram_id']}`\n    ⌛ {tleft(u['expires_at'])} · 📊 {u['usage_count']}")
+        text = "\n".join(lines)
+        if len(text) > 4096:
+            text = text[:4090] + "\n…"
+        await q.edit_message_text(text, parse_mode="Markdown", reply_markup=kb_admin())
+
+    elif d == "stats" and is_admin(uid):
+        conn  = get_db()
+        total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        act   = conn.execute("SELECT COUNT(*) FROM users WHERE active=1").fetchone()[0]
+        uses  = conn.execute("SELECT SUM(usage_count) FROM users").fetchone()[0] or 0
+        conn.close()
+        await q.edit_message_text(
+            f"📊 *Stats*\n\n👥 Total: `{total}`\n✅ Active: `{act}`\n📈 Uses: `{uses}`",
+            parse_mode="Markdown", reply_markup=kb_admin())
+
+    elif d == "help":
+        admin_txt = "\n\n👑 *Admin:* /users /setkey /kill /revive /stats /notify" if is_admin(uid) else ""
+        await q.edit_message_text(
+            "🤖 *Commands:*\n/start — Register\n/mykey — Your key\n/help — Menu" + admin_txt,
+            parse_mode="Markdown", reply_markup=kb(uid))
+
+# ─── EXPIRY CHECKER JOB ───────────────────────────────────────
+async def expiry_checker(context: ContextTypes.DEFAULT_TYPE):
+    conn  = get_db()
+    users = conn.execute(
+        "SELECT * FROM users WHERE active=1 AND expires_at IS NOT NULL AND expires_at<=?",
+        (utcnow().strftime(TIME_FORMAT),)
+    ).fetchall()
+    for u in users:
+        conn.execute("UPDATE users SET active=0 WHERE telegram_id=?", (u["telegram_id"],))
+        conn.commit()
+        try:
+            await context.bot.send_message(u["telegram_id"], "⏰ *Key expired!*\nContact admin to renew.", parse_mode="Markdown")
+        except:
+            pass
+        if ADMIN_ID:
+            try:
+                await context.bot.send_message(ADMIN_ID,
+                    f"⏰ Expired: @{u['telegram_name']} `{u['telegram_id']}`\nUse `/setkey {u['telegram_id']}` to renew.",
+                    parse_mode="Markdown")
+            except:
+                pass
+    conn.close()
+
+async def post_init(app: Application):
+    await app.bot.set_my_commands([
+        BotCommand("start",  "Register & get your key"),
+        BotCommand("mykey",  "Show your key & expiry"),
+        BotCommand("help",   "Show commands"),
+        BotCommand("users",  "List all users (admin)"),
+        BotCommand("setkey", "Set/renew key (admin)"),
+        BotCommand("kill",   "Revoke access (admin)"),
+        BotCommand("revive", "Restore access (admin)"),
+        BotCommand("stats",  "Statistics (admin)"),
+        BotCommand("notify", "Broadcast message (admin)"),
+    ])
+
+# ─── BOT THREAD ───────────────────────────────────────────────
+def run_bot():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    app.add_handler(CommandHandler("start",  cmd_start))
+    app.add_handler(CommandHandler("mykey",  cmd_mykey))
+    app.add_handler(CommandHandler("help",   cmd_help))
+    app.add_handler(CommandHandler("users",  cmd_users))
+    app.add_handler(CommandHandler("setkey", cmd_setkey))
+    app.add_handler(CommandHandler("kill",   cmd_kill))
+    a
