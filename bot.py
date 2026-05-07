@@ -166,24 +166,6 @@ def validate():
 #  TELEGRAM BOT (runs in its own thread + event loop)
 # ─────────────────────────────────────────────────────────────
 
-bot_app = None
-bot_loop = None
-
-def user_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔑 My Key", callback_data="mykey"),
-         InlineKeyboardButton("📊 My Stats", callback_data="mystats")],
-        [InlineKeyboardButton("❓ Help", callback_data="help")]
-    ])
-
-def admin_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("👥 Users", callback_data="users"),
-         InlineKeyboardButton("📊 Stats", callback_data="stats")],
-        [InlineKeyboardButton("🔑 My Key", callback_data="mykey"),
-         InlineKeyboardButton("❓ Help", callback_data="help")]
-    ])
-
 async def expiry_checker(context: ContextTypes.DEFAULT_TYPE):
     conn = get_db()
     expired_users = conn.execute(
@@ -503,4 +485,18 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     admin_cmds = (
         "\n\n👑 *Admin Commands:*\n"
         "/users — List all users\n"
-      
+        "/setkey `<id>` `[key]` `[days]` — Set/renew key\n"
+        "/kill `<id>` — Revoke access\n"
+        "/revive `<id>` — Restore + renew 1 day\n"
+        "/stats — Statistics\n"
+        "/notify `<msg>` — Broadcast to all\n"
+        "/notify `active <msg>` — Active users only"
+    ) if is_admin(uid) else ""
+    kb = admin_keyboard() if is_admin(uid) else user_keyboard()
+    await update.message.reply_text(
+        "🤖 *Commands:*\n"
+        "/start — Register & get your key\n"
+        "/mykey — Show key, expiry & usage\n"
+        "/help — Show this menu"
+        + admin_cmds,
+        parse_mode="Markdown", reply_mark
