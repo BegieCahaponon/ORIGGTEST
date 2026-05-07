@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: telegram-lua-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false       # You'll fill this in on Render dashboard
+      - key: ADMIN_ID
+        sync: false       # Your Telegram numeric ID
+      - key: PORT
+        value: 5000
